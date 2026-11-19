@@ -1,6 +1,7 @@
 # RStudio / R session
 .Rproj.user
 .Rhistory
+.Rapp.history
 .RData
 .Ruserdata
 
