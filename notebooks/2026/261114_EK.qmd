@@ -1,0 +1,830 @@
+---
+params:
+  run: "261114_EK"
+title: "`r params$run`"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    embed-resources: true
+    code-fold: true
+    df-print: paged
+    fig-width: 9
+    fig-height: 6
+    fig-dpi: 150
+execute:
+  warning: false
+  message: false
+editor: source
+---
+
+```{r}
+#| label: setup
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(purrr)
+library(stringr)
+library(ggplot2)
+library(here)
+
+# ============================================================================
+# CONFIG  --  edit between runs
+# ============================================================================
+
+# ---- Input -----------------------------------------------------------------
+# Kinetics CSVs in the standard layout: first column = time in hours, then one
+# column per well ("B2", "B3", ...). One file per fluorophore; the NAME of each
+# entry is the fluorophore label used in titles and grouping.
+infiles <- c(
+  GFP = here("data", "processed", "2026", params$run,
+             paste0(params$run, "_GFP_kinetics_raw.csv"))
+)
+
+# Two fluorophores would be:
+# infiles <- c(
+#   GFP     = here("data", "processed", "2026", "261111_EK",
+#                  "261111_EK_GFP_kinetics_raw.csv"),
+#   mCherry = here("data", "processed", "2026", "261111_EK",
+#                  "261111_EK_mCherry_kinetics_raw.csv")
+# )
+
+# Name used in figure titles. NULL = the first file's name without extension.
+dataset_label <- NULL
+
+# ---- Blanks ----------------------------------------------------------------
+# One entry per blank set. `blank` = the wells averaged per timepoint;
+# `samples` = the wells that average is subtracted from. Any well spec works:
+# "B2:B5", "B2,C2,D2", c("A1", "B3:B6"). Use samples = "rest" for every
+# remaining non-blank well not claimed by another entry.
+#
+# A well is subtracted once, by the first entry that claims it. Blank wells
+# themselves are never subtracted and are dropped from the grouped figures.
+# Set blank_groups <- list() to skip blank subtraction entirely.
+blank_groups <- list()
+
+# blank_groups <- list(
+#   list(blank = "B2:B5",  samples = "B6:B15, C2:C15"),
+#   list(blank = "D2:D5",  samples = "rest")
+# )
+
+# Use blank-subtracted values in the grouped figures?
+use_blank_subtraction <- FALSE
+
+# ---- Display window --------------------------------------------------------
+# Default hours of kinetics to show in the grouped figures. NULL or Inf = the
+# whole run. Each figure has its own knob at the top of its chunk and falls
+# back on this. The plate figure always shows the full run.
+display_hours <- NULL
+
+# Panels per row in the technical-replicate figure (NULL = ggplot decides)
+technical_ncol <- NULL
+
+# ---- Replicate structure ---------------------------------------------------
+# ONE ROW PER BIOLOGICAL REPLICATE. Its `well_spec` lists the three technical
+# replicate wells (a range "B2:B4", a list "B2,C2,D2", or both).
+# well_spec is a STRING - quote it: "B2:D2", not B2:D2.
+#
+#   technical replicates  = the wells within one row
+#   biological replicates = the rows sharing a `sample`
+#
+# Set to NULL to fall back on the auto_map() placeholder (consecutive triplets),
+# which only exists so the document renders before the real design is entered.
+sample_map <- tribble(
+  ~sample,                   ~bio_rep, ~well_spec,
+  "30C_lowOD_highson+pGFP",   1,       "O2:O4",
+  "30C_lowOD_highson_noDNA",  1,       "N2:N4",
+  "30C_lowOD_highson+pGFP",   2,       "M2:M4",
+  "30C_lowOD_highson_noDNA",  2,       "L2:L4",
+  "30C_lowOD_highson+pGFP",   3,       "K2:K4",
+  "30C_lowOD_highson_noDNA",  3,       "J2:J4",
+  "30C_lowOD_lowson+pGFP",    1,       "I2:I4",
+  "30C_lowOD_lowson_noDNA",   1,       "H2:H4",
+  "30C_lowOD_lowson+pGFP",    2,       "G2:G4",
+  "30C_lowOD_lowson_noDNA",   2,       "F2:F4",
+  "30C_lowOD_lowson+pGFP",    3,       "E2:E4",
+  "30C_lowOD_lowson_noDNA",   3,       "D2:D4",
+  "30C_highOD_highson+pGFP",  1,       "O5:O7",
+  "30C_highOD_highson_noDNA", 1,       "N5:N7",
+  "30C_highOD_highson+pGFP",  2,       "M5:M7",
+  "30C_highOD_highson_noDNA", 2,       "L5:L7",
+  "30C_highOD_highson+pGFP",  3,       "K5:K7",
+  "30C_highOD_highson_noDNA", 3,       "J5:J7",
+  "30C_highOD_lowson+pGFP",   1,       "I5:I7",
+  "30C_highOD_lowson_noDNA",  1,       "H5:H7",
+  "30C_highOD_lowson+pGFP",   2,       "G5:G7",
+  "30C_highOD_lowson_noDNA",  2,       "F5:F7",
+  "30C_highOD_lowson+pGFP",   3,       "E5:E7",
+  "30C_highOD_lowson_noDNA",  3,       "D5:D7",
+  "37C_lowOD_highson+pGFP",   1,       "M8:M10",
+  "37C_lowOD_highson_noDNA",  1,       "L8:L10",
+  "37C_lowOD_highson+pGFP",   2,       "K8:K10",
+  "37C_lowOD_highson_noDNA",  2,       "J8:J10",
+  "37C_lowOD_highson+pGFP",   3,       "I8:I10",
+  "37C_lowOD_highson_noDNA",  3,       "H8:H10",
+  "37C_lowOD_lowson+pGFP",    1,       "G8:G10",
+  "37C_lowOD_lowson_noDNA",   1,       "F8:F10",
+  "37C_lowOD_lowson+pGFP",    2,       "E8:E10",
+  "37C_lowOD_lowson_noDNA",   2,       "D8:D10",
+  "37C_lowOD_lowson+pGFP",    3,       "C8:C10",
+  "37C_lowOD_lowson_noDNA",   3,       "B8:B10",
+  "37C_highOD_highson+pGFP",  1,       "M11:M13",
+  "37C_highOD_highson_noDNA", 1,       "L11:L13",
+  "37C_highOD_highson+pGFP",  2,       "K11:K13",
+  "37C_highOD_highson_noDNA", 2,       "J11:J13",
+  "37C_highOD_highson+pGFP",  3,       "I11:I13",
+  "37C_highOD_highson_noDNA", 3,       "H11:H13",
+  "37C_highOD_lowson+pGFP",   1,       "G11:G13",
+  "37C_highOD_lowson_noDNA",  1,       "F11:F13",
+  "37C_highOD_lowson+pGFP",   2,       "E11:E13",
+  "37C_highOD_lowson_noDNA",  2,       "D11:D13",
+  "37C_highOD_lowson+pGFP",   3,       "C11:C13",
+  "37C_highOD_lowson_noDNA",  3,       "B11:B13",
+  "control_crK+pGFP",         1,       "C2:C4",
+  "control_crK_noDNA",        1,       "B2:B4",
+  "control_Noireaux+pGFP",    1,       "C5:C7",
+  "control_Noireaux_noDNA",   1,       "B5:B7"
+)
+
+# Placeholder grouping: biological replicates per sample when auto-mapping.
+auto_bio_per_sample <- 3
+
+# ---- Plateau detection -----------------------------------------------------
+# A well is called "plateaued" at the first timepoint where its smoothed trace
+# reaches `plateau_frac` of its own smoothed maximum.
+plateau_frac     <- 0.95   # fraction of the maximum
+plateau_smooth_k <- 5      # points in the centred rolling mean (1 = no smoothing)
+plateau_min_rise <- 2      # ignore wells whose total rise is below this (0 = keep all)
+
+# Plot look
+okabe_ito <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7",
+               "#E69F00", "#56B4E9", "#F0E442", "#000000")
+theme_set(
+  theme_bw(base_size = 9) +
+    theme(
+      panel.grid.minor  = element_blank(),
+      strip.background  = element_rect(fill = "grey92", colour = NA),
+      strip.text        = element_text(size = 7, margin = margin(1.5, 1.5, 1.5, 1.5)),
+      legend.position   = "bottom",
+      legend.key.height = unit(8, "pt")
+    )
+)
+```
+
+```{r}
+#| label: helpers
+
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+# ============================================================================
+# Well-ID machinery
+# ============================================================================
+
+parse_well <- function(w) {
+  m <- str_match(toupper(trimws(w)), "^([A-P])\\s*(\\d{1,2})$")
+  if (is.na(m[1, 1])) stop("Bad well ID: '", w, "'")
+  c <- as.integer(m[1, 3])
+  if (c < 1 || c > 24) stop("Column out of range (1-24) in well: '", w, "'")
+  list(row = match(m[1, 2], LETTERS), col = c)
+}
+
+# Canonical, unpadded well ID: "B02" -> "B2"
+norm_well <- function(w) {
+  p <- parse_well(w)
+  paste0(LETTERS[p$row], p$col)
+}
+
+# Expand well specs: wells("B2"), wells("A1:A4"), wells("B2:D4"),
+# wells("A1, A2, B7"), wells(c("A1", "B3:B6"))
+wells <- function(...) {
+  specs <- unlist(list(...), use.names = FALSE)
+  specs <- trimws(unlist(strsplit(specs, ","), use.names = FALSE))
+  specs <- specs[nzchar(specs)]
+
+  out <- character(0)
+  for (s in specs) {
+    if (grepl(":", s, fixed = TRUE)) {
+      parts <- strsplit(s, ":", fixed = TRUE)[[1]]
+      if (length(parts) != 2) stop("Bad well range: '", s, "'")
+      a <- parse_well(parts[1]); b <- parse_well(parts[2])
+      rr <- seq(min(a$row, b$row), max(a$row, b$row))
+      cc <- seq(min(a$col, b$col), max(a$col, b$col))
+      out <- c(out, paste0(rep(LETTERS[rr], each = length(cc)),
+                           rep(cc, times = length(rr))))
+    } else {
+      out <- c(out, norm_well(s))
+    }
+  }
+  unique(out)
+}
+
+order_wells <- function(ws) {
+  ws[order(match(substr(ws, 1, 1), LETTERS), as.integer(substring(ws, 2)))]
+}
+
+well_row <- function(ws) factor(substr(ws, 1, 1), levels = LETTERS[1:16])
+well_col <- function(ws) as.integer(substring(ws, 2))
+
+# ============================================================================
+# Reader
+# ============================================================================
+
+# Standard kinetics CSV: first column = time in hours, then one column per
+# well. Returns a long tibble: fluorophore | well | time_h | value_raw.
+# `paths` is a NAMED vector - the names become the fluorophore labels.
+read_kinetics <- function(paths) {
+  if (is.null(names(paths)) || any(!nzchar(names(paths)))) {
+    stop("`infiles` must be a named vector, e.g. c(GFP = \"path/to/file.csv\")")
+  }
+
+  imap_dfr(paths, function(path, fluoro) {
+    if (!file.exists(path)) stop("File not found: ", path)
+
+    raw <- read.csv(path, check.names = FALSE, stringsAsFactors = FALSE)
+    if (ncol(raw) < 2) stop("Expected a time column plus well columns in ",
+                            basename(path))
+
+    tcol <- names(raw)[1]
+    if (!str_detect(tcol, regex("^time", ignore_case = TRUE))) {
+      warning("First column of ", basename(path), " is '", tcol,
+              "' - treating it as time in hours.")
+    }
+    names(raw)[1] <- "time_h"
+
+    bad <- setdiff(names(raw)[-1],
+                   names(raw)[-1][str_detect(names(raw)[-1],
+                                             "^[A-Pa-p]\\s*\\d{1,2}$")])
+    if (length(bad) > 0) {
+      stop("Column name(s) in ", basename(path),
+           " are not well IDs: ", paste(head(bad, 8), collapse = ", "))
+    }
+
+    raw %>%
+      pivot_longer(-time_h, names_to = "well", values_to = "value_raw") %>%
+      mutate(
+        well        = vapply(well, norm_well, character(1)),
+        time_h      = as.numeric(time_h),
+        value_raw   = as.numeric(value_raw),
+        fluorophore = fluoro
+      )
+  }) %>%
+    select(fluorophore, well, time_h, value_raw)
+}
+
+# ============================================================================
+# Blank subtraction (per timepoint, per fluorophore, per blank set)
+# ============================================================================
+
+is_rest <- function(x) {
+  is.character(x) && length(x) == 1 && tolower(trimws(x)) == "rest"
+}
+
+spec_wells <- function(x) if (is.null(x) || is_rest(x)) character(0) else wells(x)
+
+# All wells used as blanks, across every entry
+blank_wells_of <- function(groups) {
+  unique(unlist(lapply(groups, function(g) spec_wells(g$blank))))
+}
+
+# well -> blank-set index. First entry wins; one "rest" entry mops up.
+blank_assignment <- function(groups, all_wells) {
+  bl <- intersect(blank_wells_of(groups), all_wells)
+  out <- tibble(well = character(), blank_set = integer())
+  claimed <- character(0)
+
+  for (i in seq_along(groups)) {
+    tg <- setdiff(intersect(spec_wells(groups[[i]]$samples), all_wells), bl)
+    dup <- intersect(tg, claimed)
+    if (length(dup) > 0) {
+      warning("Wells claimed by more than one blank set, first wins: ",
+              paste(head(dup, 8), collapse = ", "))
+      tg <- setdiff(tg, claimed)
+    }
+    out <- bind_rows(out, tibble(well = tg, blank_set = i))
+    claimed <- c(claimed, tg)
+  }
+
+  rest <- which(vapply(groups, function(g) is_rest(g$samples), logical(1)))
+  if (length(rest) > 1) warning("More than one 'rest' blank set - using the first.")
+  if (length(rest) >= 1) {
+    out <- bind_rows(out, tibble(well = setdiff(all_wells, c(claimed, bl)),
+                                 blank_set = rest[1]))
+  }
+  out
+}
+
+subtract_blanks <- function(d, groups) {
+  if (length(groups) == 0) {
+    return(mutate(d, value = value_raw, blank_set = NA_integer_))
+  }
+  all_wells <- unique(d$well)
+
+  missing <- setdiff(blank_wells_of(groups), all_wells)
+  if (length(missing) > 0) {
+    warning("Blank wells not in the data (ignored): ",
+            paste(head(missing, 8), collapse = ", "))
+  }
+
+  blank_vals <- map_dfr(seq_along(groups), function(i) {
+    bw <- intersect(spec_wells(groups[[i]]$blank), all_wells)
+    if (length(bw) == 0) return(tibble())
+    d %>%
+      filter(well %in% bw) %>%
+      group_by(fluorophore, time_h) %>%
+      summarise(blank = mean(value_raw, na.rm = TRUE), .groups = "drop") %>%
+      mutate(blank_set = i)
+  })
+
+  d %>%
+    left_join(blank_assignment(groups, all_wells), by = "well") %>%
+    left_join(blank_vals, by = c("fluorophore", "time_h", "blank_set")) %>%
+    mutate(value = value_raw - coalesce(blank, 0)) %>%
+    select(-blank)
+}
+
+# ============================================================================
+# Replicate map
+# ============================================================================
+
+# PLACEHOLDER: chop a well selection into consecutive triplets (one triplet =
+# one biological replicate), then group `bio_per_sample` triplets per sample.
+auto_map <- function(ws, bio_per_sample = auto_bio_per_sample,
+                     sample_names = NULL) {
+  ws <- order_wells(ws)
+  usable <- (length(ws) %/% 3) * 3
+  if (usable < length(ws)) {
+    warning("auto_map(): ", length(ws) - usable,
+            " well(s) dropped - not a multiple of three.")
+    ws <- ws[seq_len(usable)]
+  }
+  trip  <- split(ws, ceiling(seq_along(ws) / 3))
+  s_idx <- ceiling(seq_along(trip) / bio_per_sample)
+  if (is.null(sample_names)) sample_names <- sprintf("grp%02d", seq_len(max(s_idx)))
+  tibble(
+    sample    = sample_names[s_idx],
+    bio_rep   = unlist(lapply(rle(s_idx)$lengths, seq_len), use.names = FALSE),
+    well_spec = vapply(trip, paste, character(1), collapse = ",")
+  )
+}
+
+# Catch the map mistakes that would otherwise regroup wells silently
+check_map <- function(m) {
+  need <- c("sample", "bio_rep", "well_spec")
+  if (!all(need %in% names(m))) {
+    stop("sample_map needs columns: ", paste(need, collapse = ", "),
+         ". Found: ", paste(names(m), collapse = ", "),
+         " (a repeated ~sample, ~bio_rep, ~well_spec header line does this).")
+  }
+  if (anyDuplicated(names(m))) {
+    stop("sample_map has duplicate column names - check for a repeated ",
+         "~sample, ~bio_rep, ~well_spec header line.")
+  }
+
+  dup <- m %>% count(sample, bio_rep) %>% filter(n > 1)
+  if (nrow(dup) > 0) {
+    warning("sample_map: same sample + bio_rep on more than one row, their ",
+            "wells are pooled - ",
+            paste(sprintf("%s rep %s", dup$sample, dup$bio_rep),
+                  collapse = "; "))
+  }
+
+  e <- expand_map(m)
+  shared <- e %>% count(well) %>% filter(n > 1)
+  if (nrow(shared) > 0) {
+    warning("sample_map: well(s) listed in more than one entry - ",
+            paste(head(order_wells(shared$well), 8), collapse = ", "))
+  }
+  invisible(m)
+}
+
+# map (one row per biological replicate) -> one row per well, with tech_rep
+expand_map <- function(m) {
+  m %>%
+    mutate(.row = row_number()) %>%
+    rowwise(.row) %>%
+    mutate(well = list(wells(well_spec))) %>%
+    ungroup() %>%
+    unnest(well) %>%
+    group_by(sample, bio_rep) %>%
+    mutate(tech_rep = row_number()) %>%
+    ungroup() %>%
+    select(sample, bio_rep, tech_rep, well)
+}
+```
+
+```{r}
+#| label: load
+
+dataset <- dataset_label %||%
+  tools::file_path_sans_ext(basename(infiles[[1]]))
+
+blank_well_ids <- blank_wells_of(blank_groups)
+
+# Subtraction only happens if it is switched on AND blank sets exist
+blanks_applied <- use_blank_subtraction && length(blank_groups) > 0
+
+# ---- Read + blank-subtract -------------------------------------------------
+dat <- read_kinetics(infiles) %>% subtract_blanks(blank_groups)
+
+# ---- Replicate structure ---------------------------------------------------
+map_is_auto <- is.null(sample_map)
+map_used <- if (map_is_auto) {
+  auto_map(setdiff(unique(dat$well), blank_well_ids))
+} else {
+  check_map(sample_map)
+}
+
+dat <- dat %>%
+  left_join(expand_map(map_used), by = "well") %>%
+  mutate(
+    plate_row = well_row(well),
+    plate_col = well_col(well),
+    is_blank  = well %in% blank_well_ids,
+    value_use = if (blanks_applied) value else value_raw,
+    rep_id    = paste0(sample, " r", bio_rep, ".", tech_rep)
+  )
+
+value_label <- if (blanks_applied) {
+  "Fluorescence, blank-subtracted (a.u.)"
+} else {
+  "Fluorescence, raw (a.u.)"
+}
+
+# Wells in the data that the map says nothing about
+unmapped <- dat %>% filter(!is_blank, is.na(sample)) %>% distinct(well) %>% pull(well)
+if (length(unmapped) > 0) {
+  warning(length(unmapped), " well(s) in the data are not in sample_map and are ",
+          "left out of the grouped figures: ",
+          paste(head(order_wells(unmapped), 8), collapse = ", "))
+}
+
+# Wells the map expects but the file does not contain
+missing_wells <- setdiff(expand_map(map_used)$well, unique(dat$well))
+if (length(missing_wells) > 0) {
+  warning(length(missing_wells), " well(s) in sample_map are not in the data: ",
+          paste(head(order_wells(missing_wells), 8), collapse = ", "))
+}
+
+# Cut a tibble to a display window; NULL/Inf keeps everything
+window_hours <- function(d, hours) {
+  if (is.null(hours) || !is.finite(hours)) d else filter(d, time_h <= hours)
+}
+```
+
+```{r}
+#| label: blank-summary
+
+if (length(blank_groups) > 0) {
+  tibble(
+    blank_set = seq_along(blank_groups),
+    blank     = vapply(blank_groups,
+                       function(g) paste(spec_wells(g$blank), collapse = ", "),
+                       character(1)),
+    subtracted_from = vapply(seq_along(blank_groups), function(i) {
+      w <- sort(unique(dat$well[!is.na(dat$blank_set) & dat$blank_set == i]))
+      if (length(w) == 0) "-" else
+        paste0(length(w), " wells: ", paste(head(order_wells(w), 6), collapse = ", "),
+               if (length(w) > 6) ", ..." else "")
+    }, character(1))
+  ) %>%
+    print()
+}
+
+unassigned <- if (length(blank_groups) == 0) character(0) else {
+  dat %>% filter(!is_blank, is.na(blank_set)) %>% distinct(well) %>% pull(well)
+}
+if (length(unassigned) > 0) {
+  warning(length(unassigned), " well(s) have no blank set and were left raw: ",
+          paste(head(order_wells(unassigned), 8), collapse = ", "))
+}
+```
+
+```{r}
+#| label: grouping-note
+#| echo: false
+#| results: asis
+
+if (map_is_auto) {
+  cat("::: {.callout-warning}\n",
+      "## Placeholder grouping\n",
+      "Replicate structure came from `auto_map()`: wells chopped into ",
+      "consecutive triplets, ", auto_bio_per_sample, " triplets per sample. ",
+      "The grouped figures below are only meaningful once `sample_map` in the ",
+      "setup chunk holds the real design.\n",
+      ":::\n", sep = "")
+}
+```
+
+## 1. Individual traces, in plate position
+
+Every measured well in its own panel, arranged as on the plate. Raw values, so
+plate-level artefacts (edge effects, a dead well, a bubble) stay visible. Blank
+wells are drawn in orange.
+
+```{r}
+#| label: plate-traces
+#| fig-height: 8
+
+plot_plate <- function(d) {
+  ggplot(d, aes(time_h, value_raw, group = well, colour = is_blank)) +
+    geom_line(linewidth = 0.3) +
+    facet_grid(plate_row ~ plate_col) +
+    scale_colour_manual(values = c(`FALSE` = okabe_ito[1], `TRUE` = okabe_ito[2]),
+                        labels = c(`FALSE` = "sample", `TRUE` = "blank"),
+                        name = NULL) +
+    scale_x_continuous(breaks = scales::pretty_breaks(3)) +
+    labs(
+      title = paste0(dataset, " - ", unique(d$fluorophore), " - individual wells"),
+      x = "Time (h)", y = "Fluorescence, raw (a.u.)"
+    )
+}
+
+for (d in group_split(dat, fluorophore)) print(plot_plate(d))
+```
+
+## 2. Plateau times
+
+Each well is smoothed with a centred rolling mean over `r plateau_smooth_k`
+points; the plateau is the first timepoint at which the smoothed trace reaches
+`r scales::percent(plateau_frac)` of its own smoothed maximum. A well that never
+rises (flat or noise-only) gives a meaningless early time, so check `rise`
+before trusting a row. Times come from the full run, not the display window.
+
+```{r}
+#| label: plateau
+
+# Samples excluded from plateau analysis (regex on the sample name).
+# They stay in the figures as controls, they just don't get plateau numbers.
+# NULL = keep everything.
+
+plateau_exclude <- "noDNA"
+
+roll_mean <- function(x, k) {
+  if (k <= 1) return(x)
+  n <- length(x)
+  half <- (k - 1) %/% 2
+  vapply(seq_len(n), function(i) {
+    idx <- max(1, i - half):min(n, i + half)
+    mean(x[idx], na.rm = TRUE)
+  }, numeric(1))
+}
+
+plateau_of <- function(time_h, value, frac = plateau_frac, k = plateau_smooth_k) {
+  ok <- !is.na(value)
+  if (sum(ok) < 3) return(tibble(t_plateau = NA_real_, v_plateau = NA_real_,
+                                 rise = NA_real_))
+  tt <- time_h[ok]; vv <- roll_mean(value[ok], k)
+  v0 <- min(vv); vmax <- max(vv)
+  hit <- which(vv >= v0 + frac * (vmax - v0))
+  i <- if (length(hit)) hit[1] else NA_integer_
+  tibble(t_plateau = if (is.na(i)) NA_real_ else tt[i],
+         v_plateau = if (is.na(i)) NA_real_ else vv[i],
+         rise      = vmax - v0)
+}
+
+plateau_well <- dat %>%
+  filter(!is.na(sample), !is_blank,
+         if (is.null(plateau_exclude)) TRUE else !str_detect(sample, plateau_exclude)) %>%
+  group_by(fluorophore, sample, bio_rep, tech_rep, well) %>%
+  reframe(plateau_of(time_h, value_use)) %>%
+  filter(is.na(rise) | rise >= plateau_min_rise)
+
+plateau_well <- plateau_well %>%
+  mutate(across(c(t_plateau, v_plateau, rise), ~ round(.x, 2))) %>%
+  arrange(sample, bio_rep, tech_rep)
+
+# Mean +/- SD across the technical replicates of each biological replicate
+plateau_tech <- plateau_well %>%
+  group_by(fluorophore, sample, bio_rep) %>%
+  summarise(n          = sum(!is.na(t_plateau)),
+            mean_t     = mean(t_plateau, na.rm = TRUE),
+            sd_t       = sd(t_plateau, na.rm = TRUE),
+            mean_level = mean(v_plateau, na.rm = TRUE),
+            sd_level   = sd(v_plateau, na.rm = TRUE),
+            cv_level   = 100 * sd(v_plateau, na.rm = TRUE) /
+                               mean(v_plateau, na.rm = TRUE),
+            .groups = "drop") %>%
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+
+# Mean +/- SD across biological replicates (each one its technical mean).
+# Rename first: summarise() would otherwise read the mean_t it just created.
+plateau_bio <- plateau_tech %>%
+  rename(t_rep = mean_t, level_rep = mean_level) %>%
+  group_by(fluorophore, sample) %>%
+  summarise(n          = sum(!is.na(t_rep)),
+            mean_t     = mean(t_rep, na.rm = TRUE),
+            sd_t       = sd(t_rep, na.rm = TRUE),
+            mean_level = mean(level_rep, na.rm = TRUE),
+            sd_level   = sd(level_rep, na.rm = TRUE),
+            cv_level   = 100 * sd(level_rep, na.rm = TRUE) /
+                               mean(level_rep, na.rm = TRUE),
+            .groups = "drop") %>%
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+```
+
+One row per well. `t_` columns are hours, `f_` columns are fluorescence at the
+plateau in the same units as the traces. `_well` is that well; `_tech` is the
+mean over the three technical replicates of its biological replicate; `_bio` is
+the mean over the biological replicates of its sample.
+
+```{r}
+#| label: plateau-table
+
+plateau_table <- plateau_well %>%
+  select(fluorophore, well, sample, tech_rep, bio_rep,
+         t_well = t_plateau, f_well = v_plateau) %>%
+  left_join(plateau_tech %>%
+              select(fluorophore, sample, bio_rep,
+                     t_tech = mean_t, f_tech = mean_level, cv_tech = cv_level),
+            by = c("fluorophore", "sample", "bio_rep")) %>%
+  left_join(plateau_bio %>%
+              select(fluorophore, sample,
+                     t_bio = mean_t, f_bio = mean_level, cv_bio = cv_level),
+            by = c("fluorophore", "sample")) %>%
+  arrange(sample, bio_rep, tech_rep)
+
+# Drop the fluorophore column when there is only one in the data
+if (n_distinct(plateau_table$fluorophore) == 1) {
+  plateau_table <- select(plateau_table, -fluorophore)
+}
+
+# A real table: searchable, sortable, paged - in the editor preview and in the
+# rendered HTML alike. (A bare tibble only becomes a table on render, and only
+# because of df-print.)
+show_table <- function(d, page = 25) {
+  if (requireNamespace("DT", quietly = TRUE)) {
+    DT::datatable(d, rownames = FALSE, filter = "top",
+                  extensions = "Buttons",
+                  options = list(pageLength = page, scrollX = TRUE,
+                                 scrollY = "420px", scrollCollapse = TRUE,
+                                 dom = "Bfrtip",
+                                 buttons = c("copy", "csv", "excel")))
+  } else {
+    warning("Install DT for a proper table: install.packages(\"DT\")")
+    print(as.data.frame(d))
+  }
+}
+
+show_table(plateau_table)
+```
+
+## 3. Technical replicates
+
+One panel per biological replicate: its three technical replicate wells as thin
+lines, with the per-timepoint **mean ± SD** across them. `tech_hours` at the top
+of the chunk cuts the x-axis (`NULL` = the `display_hours` default from setup);
+`technical_ncol` controls the panel grid.
+
+```{r}
+#| label: technical-traces
+#| fig-height: 7
+
+# Hours to display in THIS figure. NULL = use display_hours from setup.
+tech_hours <- NULL
+
+dat_tech <- window_hours(dat, tech_hours %||% display_hours)
+
+tech_sum <- dat_tech %>%
+  filter(!is.na(sample), !is_blank) %>%
+  group_by(fluorophore, sample, bio_rep, time_h) %>%
+  summarise(avg = mean(value_use, na.rm = TRUE),
+            sd  = sd(value_use, na.rm = TRUE),
+            n   = sum(!is.na(value_use)), .groups = "drop")
+
+plot_technical <- function(d) {
+  s <- filter(tech_sum, fluorophore == unique(d$fluorophore))
+  ggplot(s, aes(time_h, avg)) +
+    geom_ribbon(aes(ymin = avg - sd, ymax = avg + sd),
+                fill = okabe_ito[1], alpha = 0.20) +
+    geom_line(data = d, aes(y = value_use, group = well),
+              colour = "grey40", linewidth = 0.25, alpha = 0.8) +
+    geom_line(colour = okabe_ito[1], linewidth = 0.6) +
+    facet_wrap(~ sample + bio_rep, ncol = technical_ncol,
+               labeller = labeller(.multi_line = FALSE)) +
+    labs(
+      title = paste0(dataset, " - ", unique(d$fluorophore),
+                     " - technical replicates (mean +/- SD)"),
+      x = "Time (h)", y = value_label
+    )
+}
+
+for (d in group_split(filter(dat_tech, !is.na(sample), !is_blank), fluorophore)) {
+  print(plot_technical(d))
+}
+```
+
+## 4. Biological replicates
+
+Each biological replicate is first collapsed to one trace (mean of its three
+technical replicates). Those traces are the thin lines; the band is the
+per-timepoint **mean ± SD** across biological replicates. `bio_hours` at the top
+of the chunk sets this figure's window independently of section 3.
+
+```{r}
+#| label: biological-traces
+#| fig-height: 6
+
+# Hours to display in THIS figure. NULL = use display_hours from setup.
+bio_hours <- NULL
+
+bio_trace <- window_hours(dat, bio_hours %||% display_hours) %>%
+  filter(!is.na(sample), !is_blank) %>%
+  group_by(fluorophore, sample, bio_rep, time_h) %>%
+  summarise(value = mean(value_use, na.rm = TRUE), .groups = "drop")
+
+bio_sum <- bio_trace %>%
+  group_by(fluorophore, sample, time_h) %>%
+  summarise(avg = mean(value, na.rm = TRUE),
+            sd  = sd(value, na.rm = TRUE),
+            n   = sum(!is.na(value)), .groups = "drop")
+
+plot_biological <- function(d) {
+  s <- filter(bio_sum, fluorophore == unique(d$fluorophore))
+  ggplot(s, aes(time_h, avg)) +
+    geom_ribbon(aes(ymin = avg - sd, ymax = avg + sd),
+                fill = okabe_ito[1], alpha = 0.20) +
+    geom_line(data = d, aes(y = value, colour = factor(bio_rep),
+                            group = bio_rep), linewidth = 0.3) +
+    geom_line(colour = okabe_ito[1], linewidth = 0.7) +
+    facet_wrap(~ sample) +
+    scale_colour_manual(values = okabe_ito, name = "bio rep") +
+    labs(
+      title = paste0(dataset, " - ", unique(d$fluorophore),
+                     " - biological replicates (mean +/- SD)"),
+      x = "Time (h)", y = value_label
+    )
+}
+
+for (d in group_split(bio_trace, fluorophore)) print(plot_biological(d))
+```
+
+## Session
+
+```{r}
+#| label: session-info
+#| code-fold: false
+
+sessionInfo()
+```
+
+```{r}
+#| label: renv-status
+#| code-fold: false
+
+# renv::status() rescans every file in the project on each render, which is slow
+# in a project that also holds data. This reads the lockfile instead and compares
+# it with the packages this report actually attached - instant, and it is the
+# part that matters for reproducing these figures.
+
+renv_report <- function() {
+  if (!requireNamespace("renv", quietly = TRUE)) {
+    return("renv is not installed for this project. Run renv::init() to start.")
+  }
+  lock_path <- renv::paths$lockfile()
+  if (!file.exists(lock_path)) return(paste("No lockfile at", lock_path))
+
+  recorded <- tryCatch(renv::lockfile_read(lock_path)$Packages,
+                       error = function(e) NULL)
+  if (is.null(recorded)) return(paste("Could not read", lock_path))
+
+  attached <- sub("^package:", "", grep("^package:", search(), value = TRUE))
+
+  # Drop everything that ships with R - renv never records these
+base_pkgs <- rownames(installed.packages(priority = c("base", "recommended")))
+attached <- setdiff(attached, base_pkgs)
+
+  tibble(
+    package  = attached,
+    loaded   = vapply(attached,
+                      function(p) as.character(utils::packageVersion(p)),
+                      character(1)),
+    lockfile = vapply(attached,
+                      function(p) if (is.null(recorded[[p]])) NA_character_
+                                  else recorded[[p]]$Version,
+                      character(1))
+  ) %>%
+    mutate(status = case_when(is.na(lockfile)     ~ "not recorded",
+                              loaded == lockfile  ~ "ok",
+                              TRUE                ~ "differs")) %>%
+    arrange(status != "ok", package)
+}
+
+res <- renv_report()
+if (is.character(res)) cat(res, "\n") else show_table(res, page = 15)
+```
+
+::: {.callout-note collapse="true"}
+## Keeping the environment reproducible
+
+A `not recorded` or `differs` row means the lockfile does not describe the
+library this report just ran against. Fix it in the console, not here:
+`renv::snapshot()` records what is installed now, `renv::restore()` rolls the
+library back to the lockfile. Commit `renv.lock` alongside this `.qmd`.
+
+For the full picture (including packages used but not attached here) run
+`renv::status()` in the console. It scans every file in the project, so add a
+`.renvignore` with `data/`, `*_files/` and `*_cache/` to keep that scan to your
+sources rather than the data files.
+:::
