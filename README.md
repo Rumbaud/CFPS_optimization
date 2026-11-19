@@ -44,15 +44,15 @@ Rendered HTML lands in `outputs/`.
 
 ## Experiments
 
-260818_EK: initial testing of ...
-260819_EK: 
-261111_EK: CFPS compared in CFEs from BL21(DE3) (grown at 30/37C and collected at OD 1/2.5-3) lysed under different conditions:
-           Jewett's lab (https://doi.org/10.1038/srep08663)/Tan's lab (https://doi.org/10.1038/s41467-020-16900-7).
-           Measurements done in Varioscan_Lux at 30C; Reaction volumes 2.5 ul, pipetted directly. Experiment done by EK
-           Problems with variability between technical replicates. 
+| plate / run | instrument | constructs tested | temperature, C | volume, ul | pipetting technique | notes |
+|---|---|---|---|
+| 260818_EK | Tecan | | | | | |
+| 260819_EK | Tecan | | | | | |
+| 261111_EK | Varioskan Lux| CFPS compared in CFEs from BL21(DE3) (grown at 30/37C and collected at OD 1/2.5-3) lysed under different conditions:
+            Jewett's lab (https://doi.org/10.1038/srep08663)/Tan's lab (https://doi.org/10.1038/s41467-020-16900-7) | 30 | 2.5 | direct | done by EK;
+            problems with variability between technical replicates |
            
-261119_EK: 261111_EK repeated on Tecan. Volumes increased to 5ul and reverse pipetting was used. Experiment done by EK
-           Problems with variability between technical replicates. 
+| 261119_EK | Tecan | same as 261111_EK | 30 | 5ul | reverse | done by EK; problems with variability between technical replicates| 
 
 
 ## Analysis decisions
