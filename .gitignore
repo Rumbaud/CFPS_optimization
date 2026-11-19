@@ -1,0 +1,22 @@
+# RStudio / R session
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+# Quarto
+/.quarto/
+**/*.quarto_ipynb
+*_files/
+*_cache/
+_freeze/
+
+# generated output
+outputs/
+
+# macOS
+.DS_Store
+
+# secrets
+.Renviron
+.env
