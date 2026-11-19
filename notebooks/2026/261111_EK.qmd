@@ -1,5 +1,7 @@
 ---
-title: "261111_EK"
+params:
+  run: "261111_EK"
+title: "`r params$run`"
 date: today
 format:
   html:
@@ -26,19 +28,31 @@ library(tibble)
 library(purrr)
 library(stringr)
 library(ggplot2)
+library(here)
 
 # ============================================================================
 # CONFIG  --  edit between runs
 # ============================================================================
 
-# The one file this report analyses. Both Tecan CSV layouts are handled
-# (block-per-well or wide "Reading" table); the layout is detected.
-infile <- "data/raw/2026/261111_EK.csv"
+# ---- Input -----------------------------------------------------------------
+# Kinetics CSVs in the standard layout: first column = time in hours, then one
+# column per well ("B2", "B3", ...). One file per fluorophore; the NAME of each
+# entry is the fluorophore label used in titles and grouping.
+infiles <- c(
+  GFP = here("data", "processed", "2026", params$run,
+             paste0(params$run, "_GFP_kinetics_raw.csv"))
+)
 
-# Fluorophore keys. For "block" files these match the section header
-# ("GFP_5ul"); for "wide" files they are matched against the nearest text
-# above the reading table (e.g. the method name "GFP kinetics RG.skax").
-fluoro_keys <- c("GFP", "mCherry")
+# Two fluorophores would be:
+# infiles <- c(
+#   GFP     = here("data", "processed", "2026", "261111_EK",
+#                  "261111_EK_GFP_kinetics_raw.csv"),
+#   mCherry = here("data", "processed", "2026", "261111_EK",
+#                  "261111_EK_mCherry_kinetics_raw.csv")
+# )
+
+# Name used in figure titles. NULL = the first file's name without extension.
+dataset_label <- NULL
 
 # ---- Blanks ----------------------------------------------------------------
 # One entry per blank set. `blank` = the wells averaged per timepoint;
@@ -57,7 +71,7 @@ blank_groups <- list()
 # )
 
 # Use blank-subtracted values in the grouped figures?
-use_blank_subtraction <- TRUE
+use_blank_subtraction <- FALSE
 
 # ---- Display window --------------------------------------------------------
 # Default hours of kinetics to show in the grouped figures. NULL or Inf = the
@@ -129,9 +143,9 @@ sample_map <- tribble(
   "37C_highOD_lowson+pGFP",   3,       "K12:M12",
   "37C_highOD_lowson_noDNA",  3,       "K13:M13",
   "control_crK+pGFP",         1,       "B14:D14",
-  "control_crK_noGFP",        1,       "B15:D15",
-  "control_Noireaux+pGFP",    1,       "E14:F14",
-  "control_Noireaux_noDNA",   1,       "E15:F15"
+  "control_crK_noDNA",        1,       "B15:D15",
+  "control_Noireaux+pGFP",    1,       "E14:G14",
+  "control_Noireaux_noDNA",   1,       "E15:G15"
 )
 
 # Placeholder grouping: biological replicates per sample when auto-mapping.
@@ -142,7 +156,7 @@ auto_bio_per_sample <- 3
 # reaches `plateau_frac` of its own smoothed maximum.
 plateau_frac     <- 0.95   # fraction of the maximum
 plateau_smooth_k <- 5      # points in the centred rolling mean (1 = no smoothing)
-plateau_min_rise <- 0      # ignore wells whose total rise is below this (0 = keep all)
+plateau_min_rise <- 2      # ignore wells whose total rise is below this (0 = keep all)
 
 # Plot look
 okabe_ito <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7",
@@ -214,109 +228,49 @@ well_row <- function(ws) factor(substr(ws, 1, 1), levels = LETTERS[1:16])
 well_col <- function(ws) as.integer(substring(ws, 2))
 
 # ============================================================================
-# Readers — both Tecan CSV layouts
+# Reader
 # ============================================================================
 
-classify_fluorophore <- function(section_name, keys = fluoro_keys) {
-  if (is.na(section_name)) return(NA_character_)
-  for (k in keys) if (startsWith(section_name, k)) return(k)
-  for (k in keys) if (str_detect(section_name, fixed(k))) return(k)
-  NA_character_
-}
-
-# "wide" layout: a "Reading" header row with one column per well,
-# elapsed time in the "avg. time [s]" column.
-.parse_wide <- function(raw, col1) {
-  hdr_rows <- which(!is.na(col1) & trimws(col1) == "Reading")
-  well_pat <- "\\(\\s*([A-P])\\s*(\\d{1,2})\\s*\\)"
-
-  nearest_name <- function(row) {
-    above <- seq_len(row - 1)
-    hit <- above[!is.na(col1[above]) &
-                   !is.na(vapply(col1[above], classify_fluorophore, character(1)))]
-    if (length(hit) == 0) NA_character_ else col1[hit[length(hit)]]
+# Standard kinetics CSV: first column = time in hours, then one column per
+# well. Returns a long tibble: fluorophore | well | time_h | value_raw.
+# `paths` is a NAMED vector - the names become the fluorophore labels.
+read_kinetics <- function(paths) {
+  if (is.null(names(paths)) || any(!nzchar(names(paths)))) {
+    stop("`infiles` must be a named vector, e.g. c(GFP = \"path/to/file.csv\")")
   }
 
-  out <- list()
-  for (hi in seq_along(hdr_rows)) {
-    hr  <- hdr_rows[hi]
-    end <- if (hi < length(hdr_rows)) hdr_rows[hi + 1] - 1 else nrow(raw)
-    body  <- (hr + 1):end
-    drows <- body[!is.na(col1[body]) & grepl("^[0-9]+$", trimws(col1[body]))]
-    if (length(drows) == 0) next
+  imap_dfr(paths, function(path, fluoro) {
+    if (!file.exists(path)) stop("File not found: ", path)
 
-    hdr   <- unlist(raw[hr, ], use.names = FALSE)
-    wcols <- which(!is.na(hdr) & str_detect(hdr, well_pat))
-    if (length(wcols) == 0) next
+    raw <- read.csv(path, check.names = FALSE, stringsAsFactors = FALSE)
+    if (ncol(raw) < 2) stop("Expected a time column plus well columns in ",
+                            basename(path))
 
-    time_s <- as.numeric(raw[drows, 2])
-    wd <- list()
-    for (cc in wcols) {
-      m <- str_match(hdr[cc], well_pat)
-      wd[[paste0(m[1, 2], as.integer(m[1, 3]))]] <- as.numeric(raw[drows, cc])
+    tcol <- names(raw)[1]
+    if (!str_detect(tcol, regex("^time", ignore_case = TRUE))) {
+      warning("First column of ", basename(path), " is '", tcol,
+              "' - treating it as time in hours.")
     }
-    out[[length(out) + 1]] <- list(name = nearest_name(hr),
-                                   time_s = time_s, well_data = wd)
-  }
-  out
-}
+    names(raw)[1] <- "time_h"
 
-# "block" layout: one block per well (well ID / Time / Temp / Mean / ...),
-# under fluorophore section headers.
-.parse_block <- function(raw, col1, col2) {
-  well_pattern <- "^[A-P](?:[1-9]|1[0-9]|2[0-4])$"
-  sec_pat <- paste0("^(", paste(fluoro_keys, collapse = "|"), ")(_|$| )")
-  section_rows <- which(!is.na(col1) & str_detect(col1, sec_pat) &
-                          (is.na(col2) | !nzchar(col2)))
-  block_starts <- which(!is.na(col1) & str_detect(col1, well_pattern))
-  if (length(section_rows) == 0 || length(block_starts) == 0) return(list())
-
-  block_section <- vapply(block_starts, function(br) {
-    prior <- section_rows[section_rows < br]
-    if (length(prior) == 0) NA_character_ else col1[prior[length(prior)]]
-  }, character(1))
-
-  out <- list()
-  for (sr in section_rows) {
-    idx <- which(block_section == col1[sr])
-    if (length(idx) == 0) next
-    t0 <- as.numeric(unlist(raw[block_starts[idx[1]] + 1, -1]))
-    time_s <- t0[!is.na(t0)]
-    wd <- list()
-    for (i in idx) {
-      br <- block_starts[i]
-      mr <- as.numeric(unlist(raw[br + 3, -1]))
-      wd[[norm_well(raw[br, 1])]] <- mr[seq_along(time_s)]
+    bad <- setdiff(names(raw)[-1],
+                   names(raw)[-1][str_detect(names(raw)[-1],
+                                             "^[A-Pa-p]\\s*\\d{1,2}$")])
+    if (length(bad) > 0) {
+      stop("Column name(s) in ", basename(path),
+           " are not well IDs: ", paste(head(bad, 8), collapse = ", "))
     }
-    out[[length(out) + 1]] <- list(name = col1[sr], time_s = time_s,
-                                   well_data = wd)
-  }
-  out
-}
 
-# Read the Tecan CSV into a long tibble:
-#   layout | fluorophore | well | time_h | value_raw
-read_tecan_long <- function(path) {
-  raw <- read.csv(path, header = FALSE, colClasses = "character",
-                  stringsAsFactors = FALSE, fill = TRUE,
-                  check.names = FALSE, na.strings = c("", "NA"))
-  col1 <- raw[[1]]; col2 <- raw[[2]]
-  layout <- if (any(!is.na(col1) & trimws(col1) == "Reading")) "wide" else "block"
-  secs <- if (layout == "wide") .parse_wide(raw, col1) else .parse_block(raw, col1, col2)
-  if (length(secs) == 0) stop("No readable data sections found in ", path)
-
-  map_dfr(secs, function(s) {
-    fl <- classify_fluorophore(s$name)
-    if (is.na(fl)) {
-      warning("Section '", s$name, "' matches no fluorophore key - skipped.")
-      return(tibble())
-    }
-    imap_dfr(s$well_data, function(v, w) {
-      tibble(well = w, time_h = s$time_s / 3600, value_raw = v)
-    }) %>% mutate(fluorophore = fl)
+    raw %>%
+      pivot_longer(-time_h, names_to = "well", values_to = "value_raw") %>%
+      mutate(
+        well        = vapply(well, norm_well, character(1)),
+        time_h      = as.numeric(time_h),
+        value_raw   = as.numeric(value_raw),
+        fluorophore = fluoro
+      )
   }) %>%
-    mutate(layout = layout) %>%
-    select(layout, fluorophore, well, time_h, value_raw)
+    select(fluorophore, well, time_h, value_raw)
 }
 
 # ============================================================================
@@ -463,8 +417,8 @@ expand_map <- function(m) {
 ```{r}
 #| label: load
 
-stopifnot(file.exists(infile))
-dataset <- tools::file_path_sans_ext(basename(infile))
+dataset <- dataset_label %||%
+  tools::file_path_sans_ext(basename(infiles[[1]]))
 
 blank_well_ids <- blank_wells_of(blank_groups)
 
@@ -472,14 +426,14 @@ blank_well_ids <- blank_wells_of(blank_groups)
 blanks_applied <- use_blank_subtraction && length(blank_groups) > 0
 
 # ---- Read + blank-subtract -------------------------------------------------
-dat <- read_tecan_long(infile) %>% subtract_blanks(blank_groups)
+dat <- read_kinetics(infiles) %>% subtract_blanks(blank_groups)
 
 # ---- Replicate structure ---------------------------------------------------
 map_is_auto <- is.null(sample_map)
 map_used <- if (map_is_auto) {
   auto_map(setdiff(unique(dat$well), blank_well_ids))
 } else {
-  sample_map
+  check_map(sample_map)
 }
 
 dat <- dat %>%
@@ -498,8 +452,20 @@ value_label <- if (blanks_applied) {
   "Fluorescence, raw (a.u.)"
 }
 
-# The file layout mattered only while parsing
-dat <- select(dat, -layout)
+# Wells in the data that the map says nothing about
+unmapped <- dat %>% filter(!is_blank, is.na(sample)) %>% distinct(well) %>% pull(well)
+if (length(unmapped) > 0) {
+  warning(length(unmapped), " well(s) in the data are not in sample_map and are ",
+          "left out of the grouped figures: ",
+          paste(head(order_wells(unmapped), 8), collapse = ", "))
+}
+
+# Wells the map expects but the file does not contain
+missing_wells <- setdiff(expand_map(map_used)$well, unique(dat$well))
+if (length(missing_wells) > 0) {
+  warning(length(missing_wells), " well(s) in sample_map are not in the data: ",
+          paste(head(order_wells(missing_wells), 8), collapse = ", "))
+}
 
 # Cut a tibble to a display window; NULL/Inf keeps everything
 window_hours <- function(d, hours) {
@@ -589,6 +555,12 @@ before trusting a row. Times come from the full run, not the display window.
 ```{r}
 #| label: plateau
 
+# Samples excluded from plateau analysis (regex on the sample name).
+# They stay in the figures as controls, they just don't get plateau numbers.
+# NULL = keep everything.
+
+plateau_exclude <- "noDNA"
+
 roll_mean <- function(x, k) {
   if (k <= 1) return(x)
   n <- length(x)
@@ -613,7 +585,8 @@ plateau_of <- function(time_h, value, frac = plateau_frac, k = plateau_smooth_k)
 }
 
 plateau_well <- dat %>%
-  filter(!is.na(sample), !is_blank) %>%
+  filter(!is.na(sample), !is_blank,
+         if (is.null(plateau_exclude)) TRUE else !str_detect(sample, plateau_exclude)) %>%
   group_by(fluorophore, sample, bio_rep, tech_rep, well) %>%
   reframe(plateau_of(time_h, value_use)) %>%
   filter(is.na(rise) | rise >= plateau_min_rise)
@@ -629,7 +602,10 @@ plateau_tech <- plateau_well %>%
             mean_t     = mean(t_plateau, na.rm = TRUE),
             sd_t       = sd(t_plateau, na.rm = TRUE),
             mean_level = mean(v_plateau, na.rm = TRUE),
-            sd_level   = sd(v_plateau, na.rm = TRUE), .groups = "drop") %>%
+            sd_level   = sd(v_plateau, na.rm = TRUE),
+            cv_level   = 100 * sd(v_plateau, na.rm = TRUE) /
+                               mean(v_plateau, na.rm = TRUE),
+            .groups = "drop") %>%
   mutate(across(where(is.numeric), ~ round(.x, 2)))
 
 # Mean +/- SD across biological replicates (each one its technical mean).
@@ -641,7 +617,10 @@ plateau_bio <- plateau_tech %>%
             mean_t     = mean(t_rep, na.rm = TRUE),
             sd_t       = sd(t_rep, na.rm = TRUE),
             mean_level = mean(level_rep, na.rm = TRUE),
-            sd_level   = sd(level_rep, na.rm = TRUE), .groups = "drop") %>%
+            sd_level   = sd(level_rep, na.rm = TRUE),
+            cv_level   = 100 * sd(level_rep, na.rm = TRUE) /
+                               mean(level_rep, na.rm = TRUE),
+            .groups = "drop") %>%
   mutate(across(where(is.numeric), ~ round(.x, 2)))
 ```
 
@@ -658,15 +637,15 @@ plateau_table <- plateau_well %>%
          t_well = t_plateau, f_well = v_plateau) %>%
   left_join(plateau_tech %>%
               select(fluorophore, sample, bio_rep,
-                     t_tech = mean_t, f_tech = mean_level),
+                     t_tech = mean_t, f_tech = mean_level, cv_tech = cv_level),
             by = c("fluorophore", "sample", "bio_rep")) %>%
   left_join(plateau_bio %>%
               select(fluorophore, sample,
-                     t_bio = mean_t, f_bio = mean_level),
+                     t_bio = mean_t, f_bio = mean_level, cv_bio = cv_level),
             by = c("fluorophore", "sample")) %>%
   arrange(sample, bio_rep, tech_rep)
 
-# Drop the fluorophore column when there is only one in the file
+# Drop the fluorophore column when there is only one in the data
 if (n_distinct(plateau_table$fluorophore) == 1) {
   plateau_table <- select(plateau_table, -fluorophore)
 }
@@ -679,6 +658,7 @@ show_table <- function(d, page = 25) {
     DT::datatable(d, rownames = FALSE, filter = "top",
                   extensions = "Buttons",
                   options = list(pageLength = page, scrollX = TRUE,
+                                 scrollY = "420px", scrollCollapse = TRUE,
                                  dom = "Bfrtip",
                                  buttons = c("copy", "csv", "excel")))
   } else {
@@ -810,7 +790,10 @@ renv_report <- function() {
   if (is.null(recorded)) return(paste("Could not read", lock_path))
 
   attached <- sub("^package:", "", grep("^package:", search(), value = TRUE))
-  attached <- setdiff(attached, "base")
+
+  # Drop everything that ships with R - renv never records these
+base_pkgs <- rownames(installed.packages(priority = c("base", "recommended")))
+attached <- setdiff(attached, base_pkgs)
 
   tibble(
     package  = attached,
@@ -843,5 +826,5 @@ library back to the lockfile. Commit `renv.lock` alongside this `.qmd`.
 For the full picture (including packages used but not attached here) run
 `renv::status()` in the console. It scans every file in the project, so add a
 `.renvignore` with `data/`, `*_files/` and `*_cache/` to keep that scan to your
-sources rather than the Tecan exports.
+sources rather than the data files.
 :::
